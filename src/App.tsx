@@ -13,13 +13,13 @@ import {
   Mail,
   Timer,
   Upload,
-  Settings,
   BarChart3,
   Edit,
   Trash2,
   Save,
   X,
-  Target
+  Target,
+  ClipboardList
 } from 'lucide-react';
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:5001/api`;
@@ -84,6 +84,15 @@ interface Shift {
   is_active: boolean;
 }
 
+interface AttendanceLog {
+    id: number;
+    operator_id: number;
+    date: string;
+    clock_in: string | null;
+    clock_out: string | null;
+    status: string;
+}
+
 interface DashboardStats {
   operators: { status: string; count: string }[];
   attendance: { status: string; count: string }[];
@@ -103,13 +112,15 @@ function App() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [productionLines, setProductionLines] = useState<ProductionLine[]>([]);
   const [stations, setStations] = useState<Station[]>([]);
+  const [attendanceLogs, setAttendanceLogs] = useState<AttendanceLog[]>([]);
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showAddOperator, setShowAddOperator] = useState(false);
+  
+  // Modal states
   const [editingOperator, setEditingOperator] = useState<Operator | null>(null);
-  const [showAddShift, setShowAddShift] = useState(false);
+  const [editingShift, setEditingShift] = useState<Shift | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
-  const [selectedLine, setSelectedLine] = useState<number | null>(null);
+  const [assigningOperator, setAssigningOperator] = useState<Operator | null>(null);
 
   // --- Data Fetching ---
   const fetchData = useCallback(async (endpoint: string, setter: Function) => {
@@ -125,12 +136,14 @@ function App() {
 
   const refreshData = useCallback(async () => {
     setLoading(true);
+    const today = new Date().toISOString().split('T')[0];
     await Promise.all([
       fetchData('departments', setDepartments),
       fetchData('operators', setOperators),
       fetchData('shifts', setShifts),
       fetchData('production-lines', setProductionLines),
       fetchData('stations', setStations),
+      fetchData(`attendance?date=${today}`, setAttendanceLogs),
       fetchData('dashboard/stats', setDashboardStats)
     ]);
     setLoading(false);
@@ -156,7 +169,7 @@ function App() {
     }
   };
 
-  const assignOperatorToStation = async (operatorId: number, stationId: number, shiftId: number) => {
+  const handleAssignmentChange = async (operatorId: number, stationId: string, shiftId: number) => {
     try {
       await fetch(`${API_BASE_URL}/shift-assignments`, {
         method: 'POST',
@@ -164,15 +177,41 @@ function App() {
         body: JSON.stringify({
           shift_id: shiftId,
           operator_id: operatorId,
-          station_id: stationId,
+          station_id: stationId === "0" ? null : stationId, // Send null to un-assign
           assigned_date: new Date().toISOString().split('T')[0]
         })
       });
       refreshData();
     } catch (error) {
-      console.error('Error assigning operator:', error);
+      console.error('Error updating assignment:', error);
     }
   };
+
+  const handleClockEvent = async (endpoint: 'clock-in' | 'clock-out', operatorId: number) => {
+    try {
+        const body: { operator_id: number; shift_id?: number } = { operator_id: operatorId };
+        if (endpoint === 'clock-in' && shifts.length > 0) {
+            body.shift_id = shifts[0].id; // Use first available shift for simplicity
+        }
+        
+        const response = await fetch(`${API_BASE_URL}/attendance/${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error);
+        }
+        
+        refreshData();
+    } catch (error) {
+        console.error(`Error on ${endpoint}:`, error);
+        alert(`Error: ${error instanceof Error ? error.message : `Failed to ${endpoint}`}`);
+    }
+  };
+
 
   // --- UI Components / Modals ---
 
@@ -189,7 +228,7 @@ function App() {
 
     const handleSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
-      const url = isEditMode ? `${API_BASE_URL}/operators/${operatorToEdit.id}` : `${API_BASE_URL}/operators`;
+      const url = isEditMode ? `${API_BASE_URL}/operators/${operatorToEdit!.id}` : `${API_BASE_URL}/operators`;
       const method = isEditMode ? 'PUT' : 'POST';
 
       try {
@@ -218,7 +257,6 @@ function App() {
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
           </div>
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Form fields are the same as before, but pre-filled */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
               <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900" required />
@@ -261,30 +299,46 @@ function App() {
     );
   };
   
-  const AddShiftForm = () => {
+  const AddOrEditShiftForm = ({ shiftToEdit, onClose }: { shiftToEdit?: Shift | null, onClose: () => void }) => {
     const [formData, setFormData] = useState({
-      name: '', start_time: '', end_time: '', start_date: '', end_date: '', capacity: '', department_id: ''
+      name: shiftToEdit?.name || '',
+      start_time: shiftToEdit?.start_time || '',
+      end_time: shiftToEdit?.end_time || '',
+      start_date: shiftToEdit?.start_date ? new Date(shiftToEdit.start_date).toISOString().split('T')[0] : '',
+      end_date: shiftToEdit?.end_date ? new Date(shiftToEdit.end_date).toISOString().split('T')[0] : '',
+      capacity: shiftToEdit?.capacity?.toString() || '',
+      department_id: shiftToEdit?.department_id?.toString() || ''
     });
+    
+    const isEditMode = !!shiftToEdit;
 
     const handleSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
+      const url = isEditMode ? `${API_BASE_URL}/shifts/${shiftToEdit!.id}` : `${API_BASE_URL}/shifts`;
+      const method = isEditMode ? 'PUT' : 'POST';
+
       try {
-        await fetch(`${API_BASE_URL}/shifts`, {
-          method: 'POST',
+        const response = await fetch(url, {
+          method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData)
         });
-        setShowAddShift(false);
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error || 'Failed to save shift');
+        }
+        onClose();
         refreshData();
       } catch (error) {
-        console.error('Error adding shift:', error);
+        console.error('Error saving shift:', error);
+        alert(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     };
 
     return (
       <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
         <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md text-gray-800">
-          <h3 className="text-lg font-semibold mb-4">Add New Shift</h3>
+          <h3 className="text-lg font-semibold mb-4">{isEditMode ? 'Edit Shift' : 'Add New Shift'}</h3>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Shift Name</label>
@@ -322,8 +376,8 @@ function App() {
               </select>
             </div>
             <div className="flex space-x-3 pt-4">
-              <button type="submit" className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">Add Shift</button>
-              <button type="button" onClick={() => setShowAddShift(false)} className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors">Cancel</button>
+              <button type="submit" className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">{isEditMode ? 'Save Changes' : 'Add Shift'}</button>
+              <button type="button" onClick={onClose} className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors">Cancel</button>
             </div>
           </form>
         </div>
@@ -331,6 +385,58 @@ function App() {
     );
   };
 
+  const AssignmentModal = ({ operator, onClose }: { operator: Operator | null, onClose: () => void }) => {
+    const [selectedShiftId, setSelectedShiftId] = useState<string>('');
+    const [selectedStationId, setSelectedStationId] = useState<string>('');
+
+    if (!operator) return null;
+
+    const availableShifts = shifts.filter(s => s.department_id === operator.department_id);
+    const availableStations = stations.filter(s => {
+        const line = productionLines.find(pl => pl.id === s.line_id);
+        return line?.department_id === operator.department_id;
+    });
+
+    const handleSubmit = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!selectedShiftId || !selectedStationId) {
+        alert("Please select a shift and a station.");
+        return;
+      }
+      handleAssignmentChange(operator.id, selectedStationId, parseInt(selectedShiftId));
+      onClose();
+    };
+
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+        <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md text-gray-800">
+          <h3 className="text-lg font-semibold mb-4">Assign {operator.name}</h3>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Shift</label>
+              <select value={selectedShiftId} onChange={e => setSelectedShiftId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                <option value="">Select a Shift</option>
+                {availableShifts.map(shift => <option key={shift.id} value={shift.id}>{shift.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Station</label>
+              <select value={selectedStationId} onChange={e => setSelectedStationId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                <option value="">Select a Station</option>
+                {availableStations.map(station => <option key={station.id} value={station.id}>{station.line_name} - {station.name}</option>)}
+              </select>
+            </div>
+             <div className="flex space-x-3 pt-4">
+              <button type="submit" className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">Assign</button>
+              <button type="button" onClick={onClose} className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  };
+  
+  
   const ImportModal = () => {
     const [file, setFile] = useState<File | null>(null);
     const [importing, setImporting] = useState(false);
@@ -718,7 +824,7 @@ function App() {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-900">Shift Management</h2>
         <button
-          onClick={() => setShowAddShift(true)}
+          onClick={() => setEditingShift({} as Shift)} // Open empty modal to add
           className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
         >
           <Plus className="w-4 h-4" />
@@ -731,37 +837,44 @@ function App() {
           const assigned = parseInt(shift.assigned_count) || 0;
           const capacity = shift.capacity || 0;
           const occupancy = capacity > 0 ? (assigned / capacity) * 100 : 0;
+          const startDate = shift.start_date ? new Date(shift.start_date).toLocaleDateString() : 'N/A';
+          const endDate = shift.end_date ? new Date(shift.end_date).toLocaleDateString() : 'N/A';
+
           return (
-            <div key={shift.id} className="bg-white rounded-lg shadow-sm border border-gray-200 text-gray-800">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold text-gray-900">{shift.name}</h3>
-                  <span className="text-sm text-gray-500">{shift.department_name}</span>
+            <div key={shift.id} className="bg-white rounded-lg shadow-sm border border-gray-200 text-gray-800 flex flex-col justify-between">
+              <div>
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-gray-900">{shift.name}</h3>
+                    <button onClick={() => setEditingShift(shift)} className="text-gray-400 hover:text-blue-600">
+                      <Edit size={16} />
+                    </button>
+                  </div>
+                  <div className="flex flex-col space-y-2 mt-2 text-sm text-gray-600">
+                     <span className="flex items-center">
+                      <Calendar className="w-4 h-4 mr-2" />
+                      {startDate} - {endDate}
+                    </span>
+                    <span className="flex items-center">
+                      <Clock className="w-4 h-4 mr-2" />
+                      {shift.start_time} - {shift.end_time}
+                    </span>
+                    <span className="flex items-center">
+                      <Users className="w-4 h-4 mr-2" />
+                      {assigned}/{capacity} Operators
+                    </span>
+                  </div>
                 </div>
-                <div className="flex flex-col space-y-2 mt-2 text-sm text-gray-600">
-                   <span className="flex items-center">
-                    <Calendar className="w-4 h-4 mr-2" />
-                    {new Date(shift.start_date).toLocaleDateString()} - {new Date(shift.end_date).toLocaleDateString()}
-                  </span>
-                  <span className="flex items-center">
-                    <Clock className="w-4 h-4 mr-2" />
-                    {shift.start_time} - {shift.end_time}
-                  </span>
-                  <span className="flex items-center">
-                    <Users className="w-4 h-4 mr-2" />
-                    {assigned}/{capacity} Operators
-                  </span>
-                </div>
-              </div>
-              <div className="p-6">
-                 <p className="text-sm text-gray-600 mb-2">
-                  {capacity - assigned} positions available
-                </p>
-                <div className="w-full bg-gray-200 rounded-full h-2.5">
-                  <div 
-                    className="bg-blue-600 h-2.5 rounded-full" 
-                    style={{ width: `${occupancy}%` }}
-                  ></div>
+                <div className="p-6">
+                   <p className="text-sm text-gray-600 mb-2">
+                    {capacity - assigned} positions available
+                  </p>
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
+                    <div 
+                      className="bg-blue-600 h-2.5 rounded-full" 
+                      style={{ width: `${occupancy}%` }}
+                    ></div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -771,7 +884,6 @@ function App() {
     </div>
   );
 
-  // Operators management view
   const OperatorsView = () => {
     const handleDelete = async (operatorId: number) => {
       if (window.confirm('Are you sure you want to delete this operator?')) {
@@ -798,7 +910,7 @@ function App() {
             <span>Import CSV</span>
           </button>
           <button
-            onClick={() => setShowAddOperator(true)}
+            onClick={() => setEditingOperator({} as Operator)} // Open empty modal to add
             className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
           >
             <Plus className="w-4 h-4" />
@@ -813,10 +925,8 @@ function App() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Operator</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Department</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Assignment</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Skill Level</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
@@ -824,25 +934,24 @@ function App() {
               {operators.map((operator) => (
                 <tr key={operator.id}>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center">
-                      <div className="ml-4">
-                        <p className="text-sm font-medium text-gray-900">{operator.name}</p>
-                        <p className="text-sm text-gray-500">{operator.email}</p>
-                      </div>
-                    </div>
+                    <p className="text-sm font-medium text-gray-900">{operator.name}</p>
+                    <p className="text-sm text-gray-500">{operator.email}</p>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">{operator.department_name}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {operator.station_name ? `${operator.line_name} - ${operator.station_name}` : <span className="text-gray-400">Unassigned</span>}
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    {operator.station_name 
+                      ? `${operator.line_name} - ${operator.station_name}`
+                      : <span className="text-gray-400">Unassigned</span>}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap"><StatusBadge status={operator.status} /></td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm capitalize">{operator.skill_level}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                     <div className="flex items-center space-x-3">
-                       <button onClick={() => setEditingOperator(operator)} className="text-blue-600 hover:text-blue-900" title="Edit Operator">
+                      <button onClick={() => setAssigningOperator(operator)} className="text-gray-500 hover:text-blue-600" title="Assign to Shift/Station">
+                        <ClipboardList size={16}/>
+                      </button>
+                      <button onClick={() => setEditingOperator(operator)} className="text-gray-500 hover:text-blue-600" title="Edit Operator">
                         <Edit size={16} />
                       </button>
-                      <button onClick={() => handleDelete(operator.id)} className="text-red-600 hover:text-red-900" title="Delete Operator">
+                      <button onClick={() => handleDelete(operator.id)} className="text-gray-500 hover:text-red-600" title="Delete Operator">
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -855,71 +964,51 @@ function App() {
       </div>
     </div>
   )};
+  
+  const AttendanceView = () => {
+    const getOperatorAttendanceStatus = (operatorId: number) => {
+        const log = attendanceLogs.find(l => l.operator_id === operatorId);
+        if (!log || !log.clock_in) return 'absent';
+        if (log.clock_in && !log.clock_out) return 'present';
+        return 'departed';
+    };
 
-  // Attendance view
-  const AttendanceView = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900">Attendance Management</h2>
-        <div className="flex space-x-2">
-          <button
-            onClick={refreshData}
-            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors flex items-center space-x-2"
-          >
-            <RefreshCw className="w-4 h-4" />
-            <span>Refresh</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Quick Clock In/Out */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Clock In/Out</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {operators.map((operator) => (
-            <div key={operator.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-              <div>
-                <p className="text-sm font-medium text-gray-900">{operator.name}</p>
-                <p className="text-xs text-gray-500">{operator.department_name}</p>
-              </div>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => {
-                    // Clock in with first available shift
-                    if (shifts.length > 0) {
-                      fetch(`${API_BASE_URL}/attendance/clock-in`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                          operator_id: operator.id,
-                          shift_id: shifts[0].id 
-                        })
-                      }).then(() => refreshData());
-                    }
-                  }}
-                  className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 transition-colors"
-                >
-                  Clock In
-                </button>
-                <button
-                  onClick={() => {
-                    fetch(`${API_BASE_URL}/attendance/clock-out`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ operator_id: operator.id })
-                    }).then(() => refreshData());
-                  }}
-                  className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 transition-colors"
-                >
-                  Clock Out
-                </button>
-              </div>
+    return (
+        <div className="space-y-6">
+          <div className="flex justify-between items-center">
+            <h2 className="text-2xl font-bold text-gray-900">Attendance Management</h2>
+          </div>
+    
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Daily Clock In/Out</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {operators.map((operator) => {
+                const status = getOperatorAttendanceStatus(operator.id);
+                return (
+                    <div key={operator.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{operator.name}</p>
+                        <p className="text-xs text-gray-500">{operator.department_name}</p>
+                      </div>
+                      <div className="flex space-x-2">
+                        {status === 'absent' && (
+                           <button onClick={() => handleClockEvent('clock-in', operator.id)} className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700">Clock In</button>
+                        )}
+                        {status === 'present' && (
+                            <button onClick={() => handleClockEvent('clock-out', operator.id)} className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">Clock Out</button>
+                        )}
+                        {status === 'departed' && (
+                             <span className="px-3 py-1 bg-gray-200 text-gray-600 text-xs rounded">Departed</span>
+                        )}
+                      </div>
+                    </div>
+                )
+              })}
             </div>
-          ))}
+          </div>
         </div>
-      </div>
-    </div>
-  );
+      );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -930,19 +1019,12 @@ function App() {
               <div className="p-2 bg-blue-100 rounded-lg"><Activity className="w-6 h-6 text-blue-600" /></div>
               <h1 className="text-xl font-bold text-gray-900">Operator Tracking System</h1>
             </div>
-            <div className="flex items-center space-x-4">
-              <button onClick={refreshData} disabled={loading} className="flex items-center space-x-2 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors">
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
-              </button>
-              <span className="text-sm text-gray-500">Last updated: {new Date().toLocaleTimeString()}</span>
-            </div>
           </div>
         </div>
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <nav className="flex space-x-1 mb-6 bg-white p-1 rounded-lg shadow-sm border border-gray-200">
+        <nav className="flex space-x-1 mb-6 bg-white p-1 rounded-lg shadow-sm border border-gray-200 overflow-x-auto">
           {[
             { id: 'dashboard', label: 'Dashboard', icon: Activity },
             { id: 'production', label: 'Production', icon: BarChart3 },
@@ -950,7 +1032,7 @@ function App() {
             { id: 'shifts', label: 'Shifts', icon: Calendar },
             { id: 'attendance', label: 'Attendance', icon: Clock }
           ].map(({ id, label, icon: Icon }) => (
-            <button key={id} onClick={() => setActiveTab(id as any)} className={`flex items-center space-x-2 px-4 py-2 rounded-md font-medium transition-colors ${activeTab === id ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'}`}>
+            <button key={id} onClick={() => setActiveTab(id as any)} className={`flex-shrink-0 flex items-center space-x-2 px-4 py-2 rounded-md font-medium transition-colors ${activeTab === id ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'}`}>
               <Icon className="w-4 h-4" />
               <span>{label}</span>
             </button>
@@ -965,8 +1047,9 @@ function App() {
         {activeTab === 'attendance' && <AttendanceView />}
 
         {/* Modals */}
-        {(showAddOperator || editingOperator) && <AddOrEditOperatorForm operatorToEdit={editingOperator} onClose={() => { setShowAddOperator(false); setEditingOperator(null); }} />}
-        {showAddShift && <AddShiftForm />}
+        {editingOperator && <AddOrEditOperatorForm operatorToEdit={editingOperator.id ? editingOperator : undefined} onClose={() => setEditingOperator(null)} />}
+        {editingShift && <AddOrEditShiftForm shiftToEdit={editingShift.id ? editingShift : undefined} onClose={() => setEditingShift(null)} />}
+        {assigningOperator && <AssignmentModal operator={assigningOperator} onClose={() => setAssigningOperator(null)} />}
         {showImportModal && <ImportModal />}
       </div>
     </div>

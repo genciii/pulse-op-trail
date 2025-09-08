@@ -243,17 +243,17 @@ app.get('/api/shifts', async (req, res) => {
 
 app.post('/api/shifts', async (req, res) => {
   try {
-    const { name, start_time, end_time, department_id, capacity } = req.body;
+    const { name, start_time, end_time, start_date, end_date, department_id, capacity } = req.body;
     
-    if (!name || !start_time || !end_time || !department_id || !capacity) {
+    if (!name || !start_time || !end_time || !department_id || !capacity || !start_date || !end_date) {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
     const result = await query(`
-      INSERT INTO shifts (name, start_time, end_time, department_id, capacity)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO shifts (name, start_time, end_time, start_date, end_date, department_id, capacity)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
-    `, [name, start_time, end_time, department_id, capacity]);
+    `, [name, start_time, end_time, start_date, end_date, department_id, capacity]);
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -265,18 +265,20 @@ app.post('/api/shifts', async (req, res) => {
 app.put('/api/shifts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, start_time, end_time, department_id, capacity } = req.body;
+    const { name, start_time, end_time, start_date, end_date, department_id, capacity } = req.body;
     
     const result = await query(`
       UPDATE shifts 
       SET name = COALESCE($1, name),
           start_time = COALESCE($2, start_time),
           end_time = COALESCE($3, end_time),
-          department_id = COALESCE($4, department_id),
-          capacity = COALESCE($5, capacity)
-      WHERE id = $6
+          start_date = COALESCE($4, start_date),
+          end_date = COALESCE($5, end_date),
+          department_id = COALESCE($6, department_id),
+          capacity = COALESCE($7, capacity)
+      WHERE id = $8
       RETURNING *
-    `, [name, start_time, end_time, department_id, capacity, id]);
+    `, [name, start_time, end_time, start_date, end_date, department_id, capacity, id]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Shift not found' });
@@ -293,22 +295,33 @@ app.put('/api/shifts/:id', async (req, res) => {
 app.post('/api/shift-assignments', async (req, res) => {
   try {
     const { shift_id, operator_id, station_id, assigned_date } = req.body;
-    
+    const date = assigned_date || new Date().toISOString().split('T')[0];
+
     if (!shift_id || !operator_id) {
       return res.status(400).json({ error: 'Shift ID and Operator ID are required' });
     }
 
+    // If station_id is null or 0, it means we are un-assigning the operator
+    if (!station_id || station_id === "0") {
+      await query(
+        'DELETE FROM shift_assignments WHERE operator_id = $1 AND assigned_date = $2',
+        [operator_id, date]
+      );
+      return res.status(200).json({ message: 'Operator unassigned successfully'});
+    }
+
+    // Upsert logic: insert a new assignment or update the station if one already exists for the operator on that day
     const result = await query(`
       INSERT INTO shift_assignments (shift_id, operator_id, station_id, assigned_date)
       VALUES ($1, $2, $3, $4)
-      ON CONFLICT (shift_id, operator_id, assigned_date) 
-      DO UPDATE SET station_id = $3
+      ON CONFLICT (operator_id, assigned_date) 
+      DO UPDATE SET station_id = EXCLUDED.station_id, shift_id = EXCLUDED.shift_id
       RETURNING *
-    `, [shift_id, operator_id, station_id, assigned_date || new Date().toISOString().split('T')[0]]);
+    `, [shift_id, operator_id, station_id, date]);
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error('Error creating shift assignment:', error);
+    console.error('Error creating/updating shift assignment:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -334,12 +347,9 @@ app.get('/api/attendance', async (req, res) => {
   try {
     const { date, operator_id } = req.query;
     let queryText = `
-      SELECT al.*, o.name as operator_name, o.email as operator_email,
-             d.name as department_name, s.name as shift_name
+      SELECT al.*, o.name as operator_name
       FROM attendance_logs al
-      LEFT JOIN operators o ON al.operator_id = o.id
-      LEFT JOIN departments d ON o.department_id = d.id
-      LEFT JOIN shifts s ON al.shift_id = s.id
+      JOIN operators o ON al.operator_id = o.id
     `;
     
     const conditions = [];
@@ -373,10 +383,10 @@ app.post('/api/attendance/clock-in', async (req, res) => {
   try {
     const { operator_id, shift_id } = req.body;
     const today = new Date().toISOString().split('T')[0];
-    const currentTime = new Date().toLocaleTimeString('en-US', { 
-      hour12: false, 
+    const currentTime = new Date().toLocaleTimeString('en-GB', { 
       hour: '2-digit', 
-      minute: '2-digit' 
+      minute: '2-digit',
+      second: '2-digit'
     });
 
     // Check if already clocked in
@@ -385,27 +395,18 @@ app.post('/api/attendance/clock-in', async (req, res) => {
       [operator_id, today]
     );
 
-    if (existing.rows.length > 0 && existing.rows[0].clock_in) {
+    if (existing.rows.length > 0 && existing.rows[0].clock_in && !existing.rows[0].clock_out) {
       return res.status(400).json({ error: 'Already clocked in today' });
     }
 
-    let result;
-    if (existing.rows.length > 0) {
-      // Update existing record
-      result = await query(`
-        UPDATE attendance_logs 
-        SET clock_in = $1, status = 'present', shift_id = $2
-        WHERE operator_id = $3 AND date = $4
-        RETURNING *
-      `, [currentTime, shift_id, operator_id, today]);
-    } else {
-      // Create new record
-      result = await query(`
-        INSERT INTO attendance_logs (operator_id, date, clock_in, status, shift_id)
-        VALUES ($1, $2, $3, 'present', $4)
-        RETURNING *
-      `, [operator_id, today, currentTime, shift_id]);
-    }
+    // Upsert logic for clock-in
+    const result = await query(`
+      INSERT INTO attendance_logs (operator_id, date, clock_in, status, shift_id)
+      VALUES ($1, $2, $3, 'present', $4)
+      ON CONFLICT (operator_id, date) 
+      DO UPDATE SET clock_in = $3, status = 'present', shift_id = $4, clock_out = NULL, total_hours = 0
+      RETURNING *
+    `, [operator_id, today, currentTime, shift_id]);
 
     // Update operator status
     await query(
@@ -424,10 +425,10 @@ app.post('/api/attendance/clock-out', async (req, res) => {
   try {
     const { operator_id } = req.body;
     const today = new Date().toISOString().split('T')[0];
-    const currentTime = new Date().toLocaleTimeString('en-US', { 
-      hour12: false, 
+    const currentTime = new Date().toLocaleTimeString('en-GB', { 
       hour: '2-digit', 
-      minute: '2-digit' 
+      minute: '2-digit',
+      second: '2-digit'
     });
 
     const existing = await query(
@@ -446,7 +447,7 @@ app.post('/api/attendance/clock-out', async (req, res) => {
 
     const result = await query(`
       UPDATE attendance_logs 
-      SET clock_out = $1, total_hours = $2
+      SET clock_out = $1, total_hours = $2, status = 'present'
       WHERE operator_id = $3 AND date = $4
       RETURNING *
     `, [currentTime, totalHours, operator_id, today]);
@@ -626,15 +627,6 @@ app.get('/api/health', async (req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Backend server is running on http://localhost:${PORT}`);
-  console.log('API endpoints available:');
-  console.log('  - GET /api/operators');
-  console.log('  - GET /api/shifts');
-  console.log('  - GET /api/attendance');
-  console.log('  - GET /api/production-lines');
-  console.log('  - GET /api/stations');
-  console.log('  - POST /api/import/operators');
-  console.log('  - GET /api/dashboard/stats');
-  console.log('  - GET /api/health');
 });
 
 export default app;

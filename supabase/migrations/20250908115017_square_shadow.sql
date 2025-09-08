@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS operators (
 );
 
 -- Shifts table
--- Added start_date and end_date to support date ranges
 CREATE TABLE IF NOT EXISTS shifts (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
@@ -72,7 +71,7 @@ CREATE TABLE IF NOT EXISTS shift_assignments (
     assigned_date DATE DEFAULT CURRENT_DATE,
     station_id INTEGER REFERENCES stations(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(shift_id, operator_id, assigned_date)
+    UNIQUE(operator_id, assigned_date) -- An operator can only have one assignment per day.
 );
 
 -- Attendance logs table
@@ -118,8 +117,7 @@ INSERT INTO production_lines (name, department_id, capacity) VALUES
 ('IC1', 1, 6),
 ('IC2', 1, 6),
 ('DIGER', 1, 5)
-ON CONFLICT (name) DO NOTHING;
-
+ON CONFLICT DO NOTHING;
 
 -- Insert sample stations for each line
 INSERT INTO stations (name, line_id, position_order) VALUES 
@@ -166,7 +164,7 @@ INSERT INTO stations (name, line_id, position_order) VALUES
 ('BANT SONU', 5, 3),
 ('BARKOD BASIM', 5, 4),
 ('DOĞUM İZNİ', 5, 5)
-ON CONFLICT (name, line_id, position_order) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Create indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_operators_status ON operators(status);
