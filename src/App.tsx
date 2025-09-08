@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Users, 
   Calendar, 
@@ -13,18 +13,18 @@ import {
   Mail,
   Timer,
   Upload,
-  Download,
   Settings,
   BarChart3,
-  TrendingUp,
-  AlertCircle,
-  CheckCircle,
-  Zap,
+  Edit,
+  Trash2,
+  Save,
+  X,
   Target
 } from 'lucide-react';
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:5001/api`;
 
+// --- Interfaces (Data Structures) ---
 interface Department {
   id: number;
   name: string;
@@ -75,10 +75,12 @@ interface Shift {
   name: string;
   start_time: string;
   end_time: string;
+  start_date: string;
+  end_date: string;
   department_id: number;
   department_name: string;
   capacity: number;
-  assigned_count: number;
+  assigned_count: string; // Comes from DB as string
   is_active: boolean;
 }
 
@@ -104,95 +106,43 @@ function App() {
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [showAddOperator, setShowAddOperator] = useState(false);
+  const [editingOperator, setEditingOperator] = useState<Operator | null>(null);
   const [showAddShift, setShowAddShift] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
 
-  // Fetch data functions
-  const fetchDepartments = async () => {
+  // --- Data Fetching ---
+  const fetchData = useCallback(async (endpoint: string, setter: Function) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/departments`);
+      const response = await fetch(`${API_BASE_URL}/${endpoint}`);
+      if (!response.ok) throw new Error(`Failed to fetch ${endpoint}`);
       const data = await response.json();
-      setDepartments(data);
+      setter(data);
     } catch (error) {
-      console.error('Error fetching departments:', error);
+      console.error(`Error fetching ${endpoint}:`, error);
     }
-  };
+  }, []);
 
-  const fetchOperators = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/operators`);
-      const data = await response.json();
-      setOperators(data);
-    } catch (error) {
-      console.error('Error fetching operators:', error);
-    }
-  };
-
-  const fetchShifts = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/shifts`);
-      const data = await response.json();
-      setShifts(data);
-    } catch (error) {
-      console.error('Error fetching shifts:', error);
-    }
-  };
-
-  const fetchProductionLines = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/production-lines`);
-      const data = await response.json();
-      setProductionLines(data);
-    } catch (error) {
-      console.error('Error fetching production lines:', error);
-    }
-  };
-
-  const fetchStations = async (lineId?: number) => {
-    try {
-      const url = lineId ? `${API_BASE_URL}/stations?line_id=${lineId}` : `${API_BASE_URL}/stations`;
-      const response = await fetch(url);
-      const data = await response.json();
-      setStations(data);
-    } catch (error) {
-      console.error('Error fetching stations:', error);
-    }
-  };
-
-  const fetchDashboardStats = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/dashboard/stats`);
-      const data = await response.json();
-      setDashboardStats(data);
-    } catch (error) {
-      console.error('Error fetching dashboard stats:', error);
-    }
-  };
-
-  const refreshData = async () => {
+  const refreshData = useCallback(async () => {
     setLoading(true);
     await Promise.all([
-      fetchDepartments(),
-      fetchOperators(),
-      fetchShifts(),
-      fetchProductionLines(),
-      fetchStations(),
-      fetchDashboardStats()
+      fetchData('departments', setDepartments),
+      fetchData('operators', setOperators),
+      fetchData('shifts', setShifts),
+      fetchData('production-lines', setProductionLines),
+      fetchData('stations', setStations),
+      fetchData('dashboard/stats', setDashboardStats)
     ]);
     setLoading(false);
-  };
+  }, [fetchData]);
 
   useEffect(() => {
     refreshData();
-    const interval = setInterval(() => {
-      fetchOperators();
-      fetchDashboardStats();
-    }, 30000);
+    const interval = setInterval(refreshData, 30000); // Refresh every 30s
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshData]);
 
-  // Status management functions
+  // --- API Interaction Functions ---
   const updateOperatorStatus = async (operatorId: number, status: string) => {
     try {
       await fetch(`${API_BASE_URL}/operators/${operatorId}/status`, {
@@ -200,7 +150,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status })
       });
-      await fetchOperators();
+      refreshData();
     } catch (error) {
       console.error('Error updating status:', error);
     }
@@ -218,89 +168,79 @@ function App() {
           assigned_date: new Date().toISOString().split('T')[0]
         })
       });
-      await Promise.all([fetchOperators(), fetchStations()]);
+      refreshData();
     } catch (error) {
       console.error('Error assigning operator:', error);
     }
   };
 
-  // Form components
-  const AddOperatorForm = () => {
+  // --- UI Components / Modals ---
+
+  const AddOrEditOperatorForm = ({ operatorToEdit, onClose }: { operatorToEdit?: Operator | null, onClose: () => void }) => {
     const [formData, setFormData] = useState({
-      name: '', email: '', employee_id: '', department_id: '', skill_level: 'beginner'
+      name: operatorToEdit?.name || '', 
+      email: operatorToEdit?.email || '', 
+      employee_id: operatorToEdit?.employee_id || '', 
+      department_id: operatorToEdit?.department_id?.toString() || '', 
+      skill_level: operatorToEdit?.skill_level || 'beginner'
     });
+
+    const isEditMode = !!operatorToEdit;
 
     const handleSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
+      const url = isEditMode ? `${API_BASE_URL}/operators/${operatorToEdit.id}` : `${API_BASE_URL}/operators`;
+      const method = isEditMode ? 'PUT' : 'POST';
+
       try {
-        await fetch(`${API_BASE_URL}/operators`, {
-          method: 'POST',
+        const response = await fetch(url, {
+          method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData)
         });
-        setFormData({ name: '', email: '', employee_id: '', department_id: '', skill_level: 'beginner' });
-        setShowAddOperator(false);
-        await fetchOperators();
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error || 'Failed to save operator');
+        }
+        onClose();
+        refreshData();
       } catch (error) {
-        console.error('Error adding operator:', error);
+        console.error('Error saving operator:', error);
+        alert(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     };
 
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
         <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
-          <h3 className="text-lg font-semibold mb-4">Add New Operator</h3>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold text-gray-800">{isEditMode ? 'Edit Operator' : 'Add New Operator'}</h3>
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+          </div>
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Form fields are the same as before, but pre-filled */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-              <input
-                type="text"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
+              <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900" required />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-              <input
-                type="email"
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
+              <input type="email" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900" required />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Employee ID</label>
-              <input
-                type="text"
-                value={formData.employee_id}
-                onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
+              <input type="text" value={formData.employee_id} onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900" />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Department</label>
-              <select
-                value={formData.department_id}
-                onChange={(e) => setFormData({ ...formData, department_id: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              >
+              <select value={formData.department_id} onChange={(e) => setFormData({ ...formData, department_id: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900" required>
                 <option value="">Select Department</option>
-                {departments.map(dept => (
-                  <option key={dept.id} value={dept.id}>{dept.name}</option>
-                ))}
+                {departments.map(dept => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Skill Level</label>
-              <select
-                value={formData.skill_level}
-                onChange={(e) => setFormData({ ...formData, skill_level: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
+              <select value={formData.skill_level} onChange={(e) => setFormData({ ...formData, skill_level: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900">
                 <option value="beginner">Beginner</option>
                 <option value="intermediate">Intermediate</option>
                 <option value="advanced">Advanced</option>
@@ -308,17 +248,10 @@ function App() {
               </select>
             </div>
             <div className="flex space-x-3 pt-4">
-              <button
-                type="submit"
-                className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors"
-              >
-                Add Operator
+              <button type="submit" className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors flex items-center justify-center space-x-2">
+                <Save size={16} /><span>{isEditMode ? 'Save Changes' : 'Add Operator'}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => setShowAddOperator(false)}
-                className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors"
-              >
+              <button type="button" onClick={onClose} className="flex-1 bg-gray-200 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-300 transition-colors">
                 Cancel
               </button>
             </div>
@@ -327,10 +260,10 @@ function App() {
       </div>
     );
   };
-
+  
   const AddShiftForm = () => {
     const [formData, setFormData] = useState({
-      name: '', start_time: '', end_time: '', capacity: '', department_id: ''
+      name: '', start_time: '', end_time: '', start_date: '', end_date: '', capacity: '', department_id: ''
     });
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -341,90 +274,56 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData)
         });
-        setFormData({ name: '', start_time: '', end_time: '', capacity: '', department_id: '' });
         setShowAddShift(false);
-        await fetchShifts();
+        refreshData();
       } catch (error) {
         console.error('Error adding shift:', error);
       }
     };
 
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-        <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+      <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
+        <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md text-gray-800">
           <h3 className="text-lg font-semibold mb-4">Add New Shift</h3>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Shift Name</label>
-              <input
-                type="text"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
+              <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                <input type="date" value={formData.start_date} onChange={(e) => setFormData({ ...formData, start_date: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+                <input type="date" value={formData.end_date} onChange={(e) => setFormData({ ...formData, end_date: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Start Time</label>
-                <input
-                  type="time"
-                  value={formData.start_time}
-                  onChange={(e) => setFormData({ ...formData, start_time: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
+                <input type="time" value={formData.start_time} onChange={(e) => setFormData({ ...formData, start_time: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">End Time</label>
-                <input
-                  type="time"
-                  value={formData.end_time}
-                  onChange={(e) => setFormData({ ...formData, end_time: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
+                <input type="time" value={formData.end_time} onChange={(e) => setFormData({ ...formData, end_time: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
               </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Capacity</label>
-              <input
-                type="number"
-                min="1"
-                value={formData.capacity}
-                onChange={(e) => setFormData({ ...formData, capacity: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
+              <input type="number" min="1" value={formData.capacity} onChange={(e) => setFormData({ ...formData, capacity: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Department</label>
-              <select
-                value={formData.department_id}
-                onChange={(e) => setFormData({ ...formData, department_id: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              >
+              <select value={formData.department_id} onChange={(e) => setFormData({ ...formData, department_id: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" required>
                 <option value="">Select Department</option>
-                {departments.map(dept => (
-                  <option key={dept.id} value={dept.id}>{dept.name}</option>
-                ))}
+                {departments.map(dept => <option key={dept.id} value={dept.id}>{dept.name}</option>)}
               </select>
             </div>
             <div className="flex space-x-3 pt-4">
-              <button
-                type="submit"
-                className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors"
-              >
-                Add Shift
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAddShift(false)}
-                className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors"
-              >
-                Cancel
-              </button>
+              <button type="submit" className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 transition-colors">Add Shift</button>
+              <button type="button" onClick={() => setShowAddShift(false)} className="flex-1 bg-gray-300 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-400 transition-colors">Cancel</button>
             </div>
           </form>
         </div>
@@ -814,7 +713,7 @@ function App() {
   };
 
   // Shifts management view
-  const ShiftsView = () => (
+ const ShiftsView = () => (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-900">Shift Management</h2>
@@ -828,43 +727,65 @@ function App() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-        {shifts.map((shift) => (
-          <div key={shift.id} className="bg-white rounded-lg shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-900">{shift.name}</h3>
-                <span className="text-sm text-gray-500">{shift.department_name}</span>
+        {shifts.map((shift) => {
+          const assigned = parseInt(shift.assigned_count) || 0;
+          const capacity = shift.capacity || 0;
+          const occupancy = capacity > 0 ? (assigned / capacity) * 100 : 0;
+          return (
+            <div key={shift.id} className="bg-white rounded-lg shadow-sm border border-gray-200 text-gray-800">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-gray-900">{shift.name}</h3>
+                  <span className="text-sm text-gray-500">{shift.department_name}</span>
+                </div>
+                <div className="flex flex-col space-y-2 mt-2 text-sm text-gray-600">
+                   <span className="flex items-center">
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {new Date(shift.start_date).toLocaleDateString()} - {new Date(shift.end_date).toLocaleDateString()}
+                  </span>
+                  <span className="flex items-center">
+                    <Clock className="w-4 h-4 mr-2" />
+                    {shift.start_time} - {shift.end_time}
+                  </span>
+                  <span className="flex items-center">
+                    <Users className="w-4 h-4 mr-2" />
+                    {assigned}/{capacity} Operators
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center space-x-4 mt-2 text-sm text-gray-600">
-                <span className="flex items-center">
-                  <Clock className="w-4 h-4 mr-1" />
-                  {shift.start_time} - {shift.end_time}
-                </span>
-                <span className="flex items-center">
-                  <Users className="w-4 h-4 mr-1" />
-                  {shift.assigned_count}/{shift.capacity}
-                </span>
+              <div className="p-6">
+                 <p className="text-sm text-gray-600 mb-2">
+                  {capacity - assigned} positions available
+                </p>
+                <div className="w-full bg-gray-200 rounded-full h-2.5">
+                  <div 
+                    className="bg-blue-600 h-2.5 rounded-full" 
+                    style={{ width: `${occupancy}%` }}
+                  ></div>
+                </div>
               </div>
             </div>
-            <div className="p-6">
-              <div className="w-full bg-gray-200 rounded-full h-2 mb-4">
-                <div 
-                  className="bg-blue-600 h-2 rounded-full" 
-                  style={{ width: `${(shift.assigned_count / shift.capacity) * 100}%` }}
-                ></div>
-              </div>
-              <p className="text-sm text-gray-600">
-                {shift.capacity - shift.assigned_count} positions available
-              </p>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 
   // Operators management view
-  const OperatorsView = () => (
+  const OperatorsView = () => {
+    const handleDelete = async (operatorId: number) => {
+      if (window.confirm('Are you sure you want to delete this operator?')) {
+        try {
+          await fetch(`${API_BASE_URL}/operators/${operatorId}`, { method: 'DELETE' });
+          refreshData();
+        } catch (error) {
+          console.error('Failed to delete operator:', error);
+          alert('Failed to delete operator.');
+        }
+      }
+    };
+    
+    return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-900">Operator Management</h2>
@@ -888,27 +809,15 @@ function App() {
 
       <div className="bg-white rounded-lg shadow-sm border border-gray-200">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
+          <table className="min-w-full divide-y divide-gray-200 text-gray-800">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Operator
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Department
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Current Assignment
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Skill Level
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Actions
-                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Operator</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Department</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Assignment</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Skill Level</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -916,69 +825,25 @@ function App() {
                 <tr key={operator.id}>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
-                      <div className="flex-shrink-0 h-10 w-10 bg-blue-100 rounded-full flex items-center justify-center">
-                        <Users className="w-5 h-5 text-blue-600" />
-                      </div>
                       <div className="ml-4">
                         <p className="text-sm font-medium text-gray-900">{operator.name}</p>
-                        <p className="text-sm text-gray-500 flex items-center">
-                          <Mail className="w-3 h-3 mr-1" />
-                          {operator.email}
-                        </p>
+                        <p className="text-sm text-gray-500">{operator.email}</p>
                       </div>
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                      <Building2 className="w-3 h-3 mr-1" />
-                      {operator.department_name}
-                    </span>
-                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">{operator.department_name}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {operator.station_name ? (
-                      <div className="flex items-center">
-                        <Timer className="w-4 h-4 mr-1 text-gray-400" />
-                        {operator.line_name} - {operator.station_name}
-                      </div>
-                    ) : (
-                      <span className="text-gray-400">Not assigned</span>
-                    )}
+                    {operator.station_name ? `${operator.line_name} - ${operator.station_name}` : <span className="text-gray-400">Unassigned</span>}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <StatusBadge status={operator.status} />
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                      operator.skill_level === 'expert' ? 'bg-purple-100 text-purple-800' :
-                      operator.skill_level === 'advanced' ? 'bg-green-100 text-green-800' :
-                      operator.skill_level === 'intermediate' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {operator.skill_level}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                    <div className="flex items-center space-x-2">
-                      <button
-                        onClick={() => updateOperatorStatus(operator.id, 'online')}
-                        className="text-green-600 hover:text-green-900 p-1 rounded hover:bg-green-50"
-                        title="Set Online"
-                      >
-                        <UserCheck className="w-4 h-4" />
+                  <td className="px-6 py-4 whitespace-nowrap"><StatusBadge status={operator.status} /></td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm capitalize">{operator.skill_level}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    <div className="flex items-center space-x-3">
+                       <button onClick={() => setEditingOperator(operator)} className="text-blue-600 hover:text-blue-900" title="Edit Operator">
+                        <Edit size={16} />
                       </button>
-                      <button
-                        onClick={() => updateOperatorStatus(operator.id, 'on_break')}
-                        className="text-amber-600 hover:text-amber-900 p-1 rounded hover:bg-amber-50"
-                        title="Set On Break"
-                      >
-                        <Coffee className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => updateOperatorStatus(operator.id, 'offline')}
-                        className="text-gray-600 hover:text-gray-900 p-1 rounded hover:bg-gray-50"
-                        title="Set Offline"
-                      >
-                        <UserX className="w-4 h-4" />
+                      <button onClick={() => handleDelete(operator.id)} className="text-red-600 hover:text-red-900" title="Delete Operator">
+                        <Trash2 size={16} />
                       </button>
                     </div>
                   </td>
@@ -989,7 +854,7 @@ function App() {
         </div>
       </div>
     </div>
-  );
+  )};
 
   // Attendance view
   const AttendanceView = () => (
@@ -1058,35 +923,25 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center space-x-3">
-              <div className="p-2 bg-blue-100 rounded-lg">
-                <Activity className="w-6 h-6 text-blue-600" />
-              </div>
+              <div className="p-2 bg-blue-100 rounded-lg"><Activity className="w-6 h-6 text-blue-600" /></div>
               <h1 className="text-xl font-bold text-gray-900">Operator Tracking System</h1>
             </div>
             <div className="flex items-center space-x-4">
-              <button
-                onClick={refreshData}
-                disabled={loading}
-                className="flex items-center space-x-2 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-              >
+              <button onClick={refreshData} disabled={loading} className="flex items-center space-x-2 px-3 py-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors">
                 <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
                 <span>Refresh</span>
               </button>
-              <span className="text-sm text-gray-500">
-                Last updated: {new Date().toLocaleTimeString()}
-              </span>
+              <span className="text-sm text-gray-500">Last updated: {new Date().toLocaleTimeString()}</span>
             </div>
           </div>
         </div>
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Navigation Tabs */}
         <nav className="flex space-x-1 mb-6 bg-white p-1 rounded-lg shadow-sm border border-gray-200">
           {[
             { id: 'dashboard', label: 'Dashboard', icon: Activity },
@@ -1095,15 +950,7 @@ function App() {
             { id: 'shifts', label: 'Shifts', icon: Calendar },
             { id: 'attendance', label: 'Attendance', icon: Clock }
           ].map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveTab(id as any)}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-md font-medium transition-colors ${
-                activeTab === id
-                  ? 'bg-blue-100 text-blue-700'
-                  : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-              }`}
-            >
+            <button key={id} onClick={() => setActiveTab(id as any)} className={`flex items-center space-x-2 px-4 py-2 rounded-md font-medium transition-colors ${activeTab === id ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'}`}>
               <Icon className="w-4 h-4" />
               <span>{label}</span>
             </button>
@@ -1118,7 +965,7 @@ function App() {
         {activeTab === 'attendance' && <AttendanceView />}
 
         {/* Modals */}
-        {showAddOperator && <AddOperatorForm />}
+        {(showAddOperator || editingOperator) && <AddOrEditOperatorForm operatorToEdit={editingOperator} onClose={() => { setShowAddOperator(false); setEditingOperator(null); }} />}
         {showAddShift && <AddShiftForm />}
         {showImportModal && <ImportModal />}
       </div>

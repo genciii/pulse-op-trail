@@ -50,11 +50,14 @@ CREATE TABLE IF NOT EXISTS operators (
 );
 
 -- Shifts table
+-- Added start_date and end_date to support date ranges
 CREATE TABLE IF NOT EXISTS shifts (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     start_time TIME NOT NULL,
     end_time TIME NOT NULL,
+    start_date DATE,
+    end_date DATE,
     department_id INTEGER REFERENCES departments(id),
     capacity INTEGER NOT NULL,
     is_active BOOLEAN DEFAULT true,
@@ -115,7 +118,8 @@ INSERT INTO production_lines (name, department_id, capacity) VALUES
 ('IC1', 1, 6),
 ('IC2', 1, 6),
 ('DIGER', 1, 5)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (name) DO NOTHING;
+
 
 -- Insert sample stations for each line
 INSERT INTO stations (name, line_id, position_order) VALUES 
@@ -162,7 +166,7 @@ INSERT INTO stations (name, line_id, position_order) VALUES
 ('BANT SONU', 5, 3),
 ('BARKOD BASIM', 5, 4),
 ('DOĞUM İZNİ', 5, 5)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (name, line_id, position_order) DO NOTHING;
 
 -- Create indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_operators_status ON operators(status);
